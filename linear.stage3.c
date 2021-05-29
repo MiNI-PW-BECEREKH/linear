@@ -25,14 +25,22 @@
 #define BACKLOG 3
 
 struct arguments {
-        int fd;
+        int* fd;
         int playerNumber;
-        char * board;
+        int position;
         int boardsize;
+        int move;
+        //sending array of semaphores are not in the shared memory it does not unlock in parent
+        sem_t semaphoreCurrentPosition;
+        sem_t semaphoreNextPosition;
 };
 
 volatile sig_atomic_t do_work=1;
 int clientNumber = 0;
+char* board;
+int gamestart= 0;
+int gamestartpoint = 0;
+int* connectedFileDescriptors;
 
 void usage(char * name){
         fprintf(stderr,"USAGE: %s socket port\n",name);
@@ -53,22 +61,6 @@ int sethandler(void (*f)(int),int sigNo)
     return 0;
 }
 
-// int make_socket(char* name, struct sockaddr_un *addr)
-// {
-//     //declare 
-//     int socketFileDescriptor;
-//     //creates a local STREAM based socket
-//     if((socketFileDescriptor = socket(PF_UNIX,SOCK_STREAM,0))<0)
-//         ERR("socket");
-//     //fills the address 0 bytes
-//     memset(addr,0,sizeof(struct sockaddr_un));
-//     //make the sun_family AF_UNIX since local socket
-//     addr->sun_family = AF_UNIX;
-//     //copy the name to the addr->sun_path 
-//     strncpy(addr->sun_path,name,sizeof(addr->sun_path)-1);
-//     return socketFileDescriptor;
-// }
-
 int make_socket(int domain, int type)
 {
     int sock;
@@ -77,6 +69,20 @@ int make_socket(int domain, int type)
     if(sock < 0 )ERR("socket");
     //return the created socket from this wrapper function.
     return sock;
+}
+
+int findPos(int x,int boardSize)
+{
+    int pos = -1;
+    for (int i = 0; i < boardSize; i++)
+    {
+        if(board[i] == x)
+        {
+            pos = i;
+        }
+    }
+    return pos;
+    
 }
 
 
@@ -185,14 +191,13 @@ void communicate(int connectedFileDescriptor,int* connectedFileDescriptors){
 }
 
 
-
 void* communicateThread(void *arg){
         struct arguments  *args= (struct arguments*) arg;
         //int tt;
         //fprintf(stderr,"Will sleep for %d\n",ntohs(args->time));
         //for (tt = ntohs(args->time); tt > 0; tt = sleep(tt));
-        char msg[500] = {0}; 
-        strcpy(msg,"The Game has Started.\n");//pfff gelde printle simdi bunu
+        char msg[100] = {0}; 
+        strcpy(msg,"The Game has Started.\n");
         // for (int i = 0; i < args->boardsize; i++)
         // {
         //     strcpy(msg,"|");
@@ -200,21 +205,110 @@ void* communicateThread(void *arg){
         //     strcpy(msg,"|");
 
         // }
+
+        char *buf = malloc(100);
+        char buf2[100];
+        buf[0] = '\0';
+        strncat(buf, "|", 100-strlen(buf)-1);
+        for (int i = 0; i < args->boardsize; ++i) {
+            if(board[i] == 32) strncpy(buf2, " ", sizeof(buf2));
+            else if (board[i] >= 0) snprintf(buf2, sizeof(buf2), "%d", board[i]);
+            strncat(buf, buf2, 100-strlen(buf)-1);
+            strncat(buf, "|", 100-strlen(buf)-1);
+        }
+        strncat(buf, "\n", 100-strlen(buf)-1);
         
 
+        if(gamestartpoint == 0)
+        if(TEMP_FAILURE_RETRY(bulk_write(*(args->fd) ,msg,sizeof(msg)))<0) ERR("sendto");
 
-        if(TEMP_FAILURE_RETRY(bulk_write(args->fd,msg,sizeof(msg)))<0) ERR("sendto");
-
-        if(TEMP_FAILURE_RETRY(bulk_write(args->fd,args->board,args->boardsize))<0) ERR("sendto");
+        if(TEMP_FAILURE_RETRY(bulk_write(*(args->fd) ,buf,strlen(buf)))<0) ERR("sendto");
         //if (sem_post(args->semaphore) == -1) ERR("sem_post");
         free(args);
         return NULL;
 }
 
+void movethePlayer(struct arguments  *args)
+{
+    board[(args->position + args->move)] = board[args->position];
+    board[args->position] = ' ';
+}
+
+// void movePlayerOrKick(void * arg)
+// {
+//     struct arguments  *args= (struct arguments*) arg;
+//     if(args->position + args->move > args->boardsize ||args->position + args->move < 0 )
+//         {
+//             if(TEMP_FAILURE_RETRY(bulk_write(args->fd,"you lost:stepped out of board",sizeof("you lost:stepped out of board")))<0) ERR("sendto");
+//             connectedFileDescriptors[args->playerNumber] = -1;
+//             board[args->position] = ' ';
+//         }
+//         else{
+//             if (TEMP_FAILURE_RETRY(sem_trywait(&args->semaphoreNextPosition) == -1)) {
+
+//                         switch(errno){
+//                         case EAGAIN:   movethePlayer(args);
+//                         }
+//                         ERR("sem_wait");
+//                 }
+//             movethePlayer(args);
+//             if ((sem_post(&args->semaphoreNextPosition) == -1)) 
+//             {ERR("sem_post");}
+//         }
+//             if ((sem_post(&args->semaphoreCurrentPosition) == -1)) 
+//         {ERR("sem_post");}
+// }
+
+
+void* movePlayer(void *arg){
+        struct arguments  *args= (struct arguments*) arg;
+        //int tt;
+        //fprintf(stderr,"Will sleep for %d\n",ntohs(args->time));
+        //for (tt = ntohs(args->time); tt > 0; tt = sleep(tt));
+        //printf("%d",args->position + args->move);
+        //if(sem_trywait(&args->semaphore[args->position]) == -1)ERR("sem_wait");
+        // if (TEMP_FAILURE_RETRY(sem_trywait(&args->semaphoreCurrentPosition) == -1)) {
+        //                 switch(errno){
+        //                 case EAGAIN:   movePlayerOrKick(arg);
+        //                 }
+        //                 ERR("sem_wait");
+        //         }
+        // movePlayerOrKick(arg);
+        if (TEMP_FAILURE_RETRY(sem_trywait(&args->semaphoreCurrentPosition) == -1));//does nothing if resource is not available
+        if(args->position + args->move > args->boardsize ||args->position + args->move < 0 )
+        {
+            if(TEMP_FAILURE_RETRY(bulk_write(*(args->fd) ,"you lost:stepped out of board\n",sizeof("you lost:stepped out of board\n")))<0) ERR("sendto");
+            close(*(args->fd));
+            *(args->fd) = -1;
+            board[args->position] = ' ';
+        }
+        else{
+            if (TEMP_FAILURE_RETRY(sem_trywait(&args->semaphoreNextPosition) == -1));
+            movethePlayer(args);
+            if ((sem_post(&args->semaphoreNextPosition) == -1)) 
+            {ERR("sem_post");}
+        }
+            if ((sem_post(&args->semaphoreCurrentPosition) == -1)) 
+        {ERR("sem_post");}
+
+        
+        free(args);
+        return NULL;
+}
+
+
 
 void doServer(int fdT, int player_num,int boardsize){
         int connectedFileDescriptor;//,fileDescriptorMax;
-        int connectedFileDescriptors[5] = {-1,-1,-1,-1,-1};
+        //int connectedFileDescriptors[5] = {-1,-1,-1,-1,-1};
+        connectedFileDescriptors = (int*)malloc(sizeof(int)*player_num);
+        for (int i = 0; i < player_num; i++)
+        {
+            connectedFileDescriptors[i] = -1;
+        }
+
+        //int* numbers = {}
+        
         char buffer[100];
         //ssize_t size;
         //Initialize 2 ready file descriptors 
@@ -232,10 +326,10 @@ void doServer(int fdT, int player_num,int boardsize){
         sigaddset (&mask, SIGINT);
         //Set the blocked signals union of current set and mask store old mask in the oldmask
         sigprocmask (SIG_BLOCK, &mask, &oldmask);
-        int gamestartpoint = 0;
+
 
         //initialize board
-        char* board = (char*)malloc(sizeof(char)*boardsize);
+        board = (char*)malloc(sizeof(char)*boardsize);
         memset(board,0,boardsize);
         for (int i = 0; i < boardsize; i++)
         {
@@ -243,14 +337,19 @@ void doServer(int fdT, int player_num,int boardsize){
         }
         
 
-        int gamestart= 0;
+        
         pthread_t thread;
         //struct sockaddr_in addr;
         struct arguments *args;
         socklen_t size=sizeof(struct sockaddr_in);
-        sem_t semaphore;
-        if (sem_init(&semaphore, 0, 5) != 0)
+        sem_t* boardSemaphores = (sem_t*)malloc(sizeof(sem_t)*boardsize);
+        for (int i = 0; i < boardsize; i++)
+        {
+            if(sem_init(&boardSemaphores[i],0,1)<0)
                 ERR("sem_init");
+        }
+        
+                
         struct timespec tv;
         tv.tv_sec =1;
         tv.tv_nsec = 0;
@@ -313,27 +412,96 @@ void doServer(int fdT, int player_num,int boardsize){
                         //here parse the command
                         if(strncmp("-2",command,strlen("-2"))==0)
                         {
-                            printf("read -2 from client %d\n",i);
+                            //printf("read -2 from client %d\n",i);
+                            int num = i;
+                            if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
+                            args->fd=&connectedFileDescriptors[i];
+                            args->playerNumber=num;
+                            args->boardsize = boardsize;
+                            args->position = findPos(i,boardsize);
+                            args->move = -2;
+                            args->semaphoreCurrentPosition = boardSemaphores[args->position];
+                            if(args->position + args->move > 0 && args->position + args->move < boardsize)
+                            {
+                                args->semaphoreNextPosition = boardSemaphores[args->position + args->move];
+
+                            }
+                            if (pthread_create(&thread, NULL,movePlayer, (void *)args) != 0) ERR("pthread_create");
 
                         }
                         else if(strncmp("-1",command,strlen("-1"))==0)
                         {
-                            printf("read -1 from client %d\n",i);
+                            //printf("read -1 from client %d\n",i);
+                                                        //printf("read -2 from client %d\n",i);
+                                                                                                            int num = i;
+
+                            if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
+                            args->fd=&connectedFileDescriptors[i];
+                            args->playerNumber=num;
+                            args->boardsize = boardsize;
+                            args->position = findPos(i,boardsize);
+                            args->move = -1;
+                            args->semaphoreCurrentPosition = boardSemaphores[args->position];
+                            if(args->position + args->move > 0 && args->position + args->move < boardsize)
+                            {
+                                args->semaphoreNextPosition = boardSemaphores[args->position + args->move];
+
+                            }
+                            if (pthread_create(&thread, NULL,movePlayer, (void *)args) != 0) ERR("pthread_create");
 
                         }
                         else if(strncmp("0",command,strlen("0"))==0)
                         {
-                            printf("read 0 from client %d\n",i);
+                            int num =i;
+                            if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
+                            args->fd=&connectedFileDescriptors[i];
+                            args->playerNumber=num;
+                            args->boardsize = boardsize;
+                            if (pthread_create(&thread, NULL,communicateThread, (void *)args) != 0) ERR("pthread_create");
+                            //if (pthread_detach(thread) != 0) ERR("pthread_detach");
+
 
                         }
                         else if(strncmp("1",command,strlen("1"))==0)
                         {
-                            printf("read 1 from client %d\n",i);
+                            //printf("read 1 from client %d\n",i);
+                                                        //printf("read -2 from client %d\n",i);
+                            int num = i;
+
+                            if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
+                            args->fd=&connectedFileDescriptors[i];
+                            args->playerNumber=num;
+                            args->boardsize = boardsize;
+                            args->position = findPos(i,boardsize);
+                            args->move = 1;
+                            args->semaphoreCurrentPosition = boardSemaphores[args->position];
+                            if(args->position + args->move > 0 && args->position + args->move < boardsize)
+                            {
+                                args->semaphoreNextPosition = boardSemaphores[args->position + args->move];
+
+                            }
+                            if (pthread_create(&thread, NULL,movePlayer, (void *)args) != 0) ERR("pthread_create");
 
                         }
                         else if(strncmp("2",command,strlen("2"))==0)
                         {
-                            printf("read 2 from client %d\n",i);
+                            //printf("read 2 from client %d\n",i);
+                                                        //printf("read -2 from client %d\n",i);
+                                                                                                            int num = i;
+
+                            if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
+                            args->fd=&connectedFileDescriptors[i];
+                            args->playerNumber=num;
+                            args->boardsize = boardsize;
+                            args->position = findPos(i,boardsize);
+                            args->move = 2;
+                            args->semaphoreCurrentPosition = boardSemaphores[args->position];
+                            if(args->position + args->move > 0 && args->position + args->move < boardsize)
+                            {
+                                args->semaphoreNextPosition = boardSemaphores[args->position + args->move];
+
+                            }
+                            if (pthread_create(&thread, NULL,movePlayer, (void *)args) != 0) ERR("pthread_create");
 
                         }
 
@@ -344,21 +512,18 @@ void doServer(int fdT, int player_num,int boardsize){
                 if(clientNumber == player_num && gamestartpoint == 0)
                 {
                     gamestart = 1;
-                    gamestartpoint =1;
+                    
                     printf("Enough players active\n");
                     //randomize positions
                     srand(time(NULL));
+
+                    int randomNumber = -1;
                     for(int i =0 ; i < player_num; i++)
                     {
-                        int randomNumber = rand() % boardsize;
+
+                        randomNumber = rand() % boardsize;
                         board[randomNumber] = i;
 
-                        for (int i = 0; i < boardsize; i++)
-                        {
-                            char c = board[i];
-                            printf("|%d|",c);
-                        }
-                        printf("\n");
                     }
 
 
@@ -368,17 +533,20 @@ void doServer(int fdT, int player_num,int boardsize){
                     for (int i = 0; i < player_num; i++)
                     {
                         if((args=(struct arguments*)malloc(sizeof(struct arguments)))==NULL) ERR("malloc:");
-                        args->fd=connectedFileDescriptors[i];
+                        args->fd=&connectedFileDescriptors[i];
                         args->playerNumber=i;
-                        args->board = board;
                         args->boardsize = boardsize;
                         if (pthread_create(&thread, NULL,communicateThread, (void *)args) != 0) ERR("pthread_create");
                         //if (pthread_detach(thread) != 0) ERR("pthread_detach");
                     }
+                    gamestartpoint =1;
                 }
 
 
             }
+
+
+
 
                 else
                 {
