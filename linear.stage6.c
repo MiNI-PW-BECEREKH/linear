@@ -102,7 +102,7 @@ int bind_tcp_socket(uint16_t port)
     memset(&addr,0,sizeof(struct sockaddr_in));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     //why we use setsockopt here in this way?
     //sets the SO_REUSEADDR option of socket on socket level to t which is 1
     //allows new program to rebind to the IP/port
